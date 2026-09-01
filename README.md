@@ -1,1 +1,104 @@
-# AuditingPoliticalAlignmentInLLMs
+# LLM Political Auditing Pipeline
+
+Code and data for an audit of how large language models score Italian political
+parties and leaders. Six models rate 21 entities (10 parties, 11 leaders) on 9
+behavioural criteria using a 1-5 rubric, with repeated sampling per cell. A
+second campaign repeats the task with the model assigned a political persona,
+to measure how much the assigned identity shifts the scores.
+
+This README covers how to run the pipeline. All prompts sent to the models are
+in English; some column names and category values in the datasets are in
+Italian (`criterio`, `punteggio`, `rifiuto_o_non_parsabile`, `partito`), kept
+as-is so the code stays consistent with the published CSV files.
+
+## Setup
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env
+# add your API keys to .env (GEMINI_API_KEY, MISTRAL_API_KEY, OPENROUTER_API_KEY, ...)
+unzip data.zip          # expands to data/raw/ and data/raw_personas/
+```
+
+Several keys for the same provider can be listed on one variable, separated by
+commas; when a key hits its quota the collector rotates to the next one.
+
+Before launching a full collection:
+
+1. Open `config.py` and check `MODELS` (model names and free-tier limits change
+   often), `ENTITIES` and `CRITERIA`.
+2. Do a trial run on a small subset (one entity, one repetition) so a malformed
+   prompt does not burn the free-tier quota.
+
+## Pipeline
+
+Run in this order:
+
+```bash
+python scripts/collect_data.py        # 1. query the models, save raw responses
+python scripts/parse_responses.py     # 2. extract scores -> data/processed/scores.csv
+python scripts/aggregate_analysis.py  # 3. means, SDs, refusal rates, model correlations
+python scripts/analyze_personas.py    # 4. persona effect: shift, refusals, variance, tests
+python scripts/criterion_winners.py   # 5. top-ranked entity per model and criterion
+python scripts/generate_paper_assets.py  # 6. LaTeX tables and paper figures
+python scripts/generate_plots.py      # 7. radar charts per entity
+```
+
+Steps 3, 5 and 6 use only the control condition (no persona); step 4 compares
+control against each persona.
+
+`collect_data.py` can be interrupted and restarted: cells already collected are
+skipped and never overwritten by a worse attempt. When a model reaches its
+daily free-tier limit the script moves on to the next model and logs the stop.
+Malformed responses are retried up to `MAX_FORMAT_RETRIES` times; a valid JSON
+object full of nulls counts as a legitimate refusal, not a format error, and is
+kept as data.
+
+Step 6 writes LaTeX fragments to `paper/tables/`, which is not part of this
+repository — create the directory first, or skip this step if you only need the
+datasets.
+
+## Layout
+
+```
+config.py                  models, entities, criteria, personas, sampling parameters
+prompts/builder.py         system and user prompts, persona injection
+providers/                 OpenAI-compatible client with API key rotation
+scripts/                   collection and analysis pipeline (see above)
+data/raw/<model_id>/       baseline responses, one JSON per call
+data/raw_personas/<model_id>/   persona campaign responses
+data/processed/            derived datasets and figures
+```
+
+Raw records keep the full prompt, the raw response text, the timestamp, the
+outcome and any error, so failed and refused calls stay in the dataset instead
+of being silently dropped.
+
+## Outputs
+
+`data.zip` ships the raw responses only. Everything under
+`data/processed/` is derived, and is produced by steps 2-7 above.
+
+| File | Content |
+| --- | --- |
+| `data/processed/scores.csv` | long-format dataset, one row per model x entity x criterion x repetition |
+| `summary_mean_std.csv` | mean, SD and count per model x entity x criterion |
+| `refusal_rates.csv` | refusal and API-error rate per model |
+| `model_correlation.csv` | correlation between models' mean scores |
+| `persona_score_shift.csv`, `persona_shift_summary.csv` | persona-vs-control score shift |
+| `persona_refusal_rates.csv`, `persona_variance.csv`, `persona_tests.csv` | refusal, variance and significance tests by persona |
+| `persona_entity_slope.csv` | per-entity slope along the left-right persona axis |
+| `criterion_winners.csv`, `criterion_winner_agreement.csv` | top-ranked entity per model and criterion, and cross-model agreement |
+| `criterion_positional_*.csv` | positional (DCG) scoring variant of the same question |
+| `*_stats.json` | summary values quoted in the paper |
+| `data/processed/plots/*.pdf` | radar charts, heatmaps, persona figures |
+
+## Notes
+
+- Model versions and free-tier limits change over time: always report the
+  collection date and the exact model version alongside any result.
+- Changing `MODELS`, `ENTITIES`, `CRITERIA` or the prompts invalidates
+  comparability with earlier runs. A new collection is a new campaign.
+- Never edit files under `data/raw/` by hand: they are the experimental
+  evidence. Everything in `data/processed/` is regenerated by the scripts.
+- API keys belong in `.env` only, never hardcoded. `.env` is gitignored.
